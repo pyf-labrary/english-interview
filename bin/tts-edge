@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""tts-edge — Microsoft Edge Neural TTS wrapper（免 API key，质量好）.
+
+主要用途：英语面试听力训练（英国/印度口音），中文新闻播报仍走 MiniMax。
+对齐 ~/claw/bin/tts-openai 的接口：--text / --out / --voice。
+
+预设声音别名：
+  british        en-GB-RyanNeural      男 / 中性英式 RP
+  british-f      en-GB-SoniaNeural     女 / RP
+  british-libby  en-GB-LibbyNeural     女 / 偏年轻
+  british-thomas en-GB-ThomasNeural    男 / 商务感
+  indian         en-IN-PrabhatNeural   男 / 印度英语
+  indian-f       en-IN-NeerjaNeural    女 / 印度英语
+  us             en-US-AndrewNeural    男 / 美音兜底
+  au             en-AU-WilliamNeural   男 / 澳音
+
+也可直接传完整 voice 名（如 en-GB-RyanNeural）。
+
+例：
+  tts-edge --text "Tell me about a time you led a project." --voice british --out q.mp3
+  echo "..." | tts-edge --voice indian --out a.mp3 --rate=-5%
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+from pathlib import Path
+
+VOICE_ALIAS = {
+    "british": "en-GB-RyanNeural",
+    "british-m": "en-GB-RyanNeural",
+    "british-f": "en-GB-SoniaNeural",
+    "british-libby": "en-GB-LibbyNeural",
+    "british-thomas": "en-GB-ThomasNeural",
+    "british-maisie": "en-GB-MaisieNeural",
+    "indian": "en-IN-PrabhatNeural",
+    "indian-m": "en-IN-PrabhatNeural",
+    "indian-f": "en-IN-NeerjaNeural",
+    "us": "en-US-AndrewNeural",
+    "us-f": "en-US-AvaNeural",
+    "au": "en-AU-WilliamNeural",
+}
+
+
+async def synthesize(text: str, voice: str, out: Path, rate: str, pitch: str):
+    import edge_tts
+    communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+    await communicate.save(str(out))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Microsoft Edge Neural TTS wrapper")
+    ap.add_argument("--text", help="要朗读的文本；`-` 或省略 = stdin")
+    ap.add_argument("--out", help="输出 mp3 路径（--list 时可省）")
+    ap.add_argument("--voice", default="british", help="声音别名或完整名")
+    ap.add_argument("--rate", default="+0%", help="语速 ±N%% (e.g. -10%%, +15%%)")
+    ap.add_argument("--pitch", default="+0Hz", help="音高 ±NHz")
+    ap.add_argument("--list", action="store_true", help="列出可用声音预设")
+    args = ap.parse_args()
+
+    if args.list:
+        for k, v in VOICE_ALIAS.items():
+            print(f"  {k:18s} {v}")
+        return
+    if not args.out:
+        sys.exit("--out 必填")
+
+    text = args.text
+    if not text or text == "-":
+        text = sys.stdin.read()
+    text = text.strip()
+    if not text:
+        sys.exit("空文本")
+
+    voice = VOICE_ALIAS.get(args.voice, args.voice)
+    out = Path(args.out).expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    asyncio.run(synthesize(text, voice, out, args.rate, args.pitch))
+    print(str(out))
+
+
+if __name__ == "__main__":
+    main()

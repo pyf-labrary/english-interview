@@ -1,0 +1,27 @@
+# venv / build artefacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# secrets — never commit; load from EnvironmentFile / shell env at deploy time
+*.env
+.env*
+!.env.example
+
+# CLI runtime state
+cli/logs/
+cli/.state.json
+
+# editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# audio scratch
+*.mp3
+*.webm
+*.m4a
+*.wav
