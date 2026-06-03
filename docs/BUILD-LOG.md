@@ -67,9 +67,36 @@ FastAPI :8765 (systemd, eng-interview.service)
 - 单 turn 总延迟：~10-15s（用户能等）
 - 内存：38-45 MB（whisper 模型懒加载，第一次 STT 触发时下 ~75MB）
 
-## 后续 vNext 备忘
+## 2026-06-03 · v2 STT 流式化 + 自托管 + 学习向大改
 
-- DeepSeek 兜底：撞 busy 自动切 MiniMax abab6.5（同 OpenAI 协议）
-- 进度云同步：每场 logs 落 GitHub gist
-- 接 BOSS 直聘：当天感兴趣岗位 JD 自动塞 `role`
-- 发音评分：尝试 Azure Speech Pronunciation Assessment（首 5 小时免费）
+一个下午连做四块（commits `da0d914`→`9af5b9b`）：
+
+### 1. STT：从"说完才出"改成流式 + 提准（`da0d914` `29d7739`）
+- 之前 Web Speech 实时字幕被当"纯 UX"丢弃，真正喂 LLM 的是上传整段音频→`tiny.en`（最弱档），所以又慢又不准。
+- 改：**Web Speech 的实时文本直接当评分依据**，走新端点 `POST /api/turn-text`（只收文本，跳过音频上传/ffmpeg/whisper）→ 真流式"边说边弹词" + 准确率碾压 tiny.en。识别为空/失败自动回落音频走 `/api/turn`。whisper 兜底升 `base.en + beam_size=5 + initial_prompt 词表`。
+- **决定不做的反转**：v1 build-log 里写"STT 流式不值得做"——错了。不是去搞 streaming-whisper（那在 2 核无 GPU 服务器上确实不可行），而是直接用浏览器免费引擎当主转写源，零服务器成本就拿到了流式 + 高准确率。
+- **bug：按住录音停不下来**（`29d7739`）。`beginRecord` 是 async（await getUserMedia，含首次授权弹窗），快速点按/松手时 `endRecord` 在录音器还没建好就跑了，之后 beginRecord 恢复又把录音重开，phase 卡死在 recording、两个按钮守卫互锁。修：await 后加竞态守卫（已松手就别开录）+ 提交只由 `rec.onstop`/`SR.onend` 触发，不在 endRecord 里提交。
+
+### 2. 卡顿根因：墙内被 Google Fonts 阻塞（`c03a7b2`）
+- 用户反馈"访问很卡"。实测：pyf 发页面 0.13s，但 `fonts.googleapis.com` 直连 **12s timeout**（被墙，且 `<link>` 渲染阻塞）→ 整页冻住十几秒；外加 unpkg/tailwind CDN 慢 + 浏览器端 3.1MB Babel 现编译。
+- 修：**全部依赖本地自托管 + 系统字体 + 预编译去 Babel**。index.html 拆成 3KB 壳 + `app.src.jsx`(源) + `app.js`(预编译 27KB) + `vendor/`(react/react-dom/tailwind)。加 `build.sh`。载荷 3.6MB→~580KB 全同域。**从此不再是"单文件无构建"**。
+
+### 3. 前端搬到同域自托管，GH Pages 退役（`65c669b` + DELETE /pages）
+- FastAPI `GET /` 直接发 index.html，`/app.js` + mount `/vendor`。openresty 早就是 `location /` 整站反代，所以白嫖现成。
+- 唯一入口改 **https://eng.panyifeng.xyz/**（前后端同域、无 CORS、墙内稳）。GitHub Pages 用 API `DELETE /repos/.../pages` 关停，旧址 404。Marginalia `/apps/` 链接改指新址。
+
+### 4. 学习向功能：从"考你"变"教你"（`61d67e6`）
+- 用户起步水平、很多题答不上 → 加：① **topic 维度**（general/ai/backend/sysdesign/cs/behavioral/myproj），默认全方位从零、不绑 Army，只 myproj 注入 profile。② **每题范答** model_answer + key_points_zh。③ **一键跳过看范答** `/api/skip`。④ 题数到 20。⑤ **AI 对练观摩** `/api/spar`（整段双语对话）+ `/api/tts`（逐句双声线），前端聊天式自动播放 + 播放控制 + 中英切换。
+
+### 关键判断
+- 主转写源选浏览器 Web Speech 而非云 ASR（Deepgram 等）：用户常挂代理 + Chrome，免费引擎已够好；云 ASR 留作"不够再上"。
+- 预编译 vs 自托管 Babel：Babel standalone 3.1MB 太重，预编译到 27KB app.js 一步到位。
+
+## 后续 vNext 备忘 / 待办
+
+- **STT 升级（按需）**：用户取向"先免费不够再上付费"。若浏览器 Web Speech 不够稳/准，接 Deepgram 或 AssemblyAI 浏览器直连 WebSocket 流式（~¥0.03/min），是天花板方案。
+- **录音交互**：当前是 press-and-hold。曾向用户提议 tap-to-toggle（点开始/点结束，手机更顺手），用户暂未要；若嫌按住累可切换。
+- **openresty 配置不在仓**：限流 location 是服务器端手改，1panel 面板重写站点配置会丢，需按 README「部署」段重打。
+- 发音评分：Azure Speech Pronunciation Assessment（首 5h 免费）。
+- 进度云同步：每场 logs 落 GitHub gist。
+- DeepSeek 兜底再加一层：撞 busy 自动切 MiniMax / 小米 MiMo（同 OpenAI/Anthropic 协议）。
