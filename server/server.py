@@ -30,6 +30,7 @@ import requests
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ─── 路径 / 题库 / profile ────────────────────────────────────────────────
@@ -40,9 +41,12 @@ PROFILE = (SRC_ROOT / "profile.md").read_text(encoding="utf-8") if (SRC_ROOT / "
 QBANK = (SRC_ROOT / "question_bank.md").read_text(encoding="utf-8") if (SRC_ROOT / "question_bank.md").exists() else ""
 # tts-edge：默认仓库根 ./bin/tts-edge；env TTS_EDGE 可覆盖
 TTS_EDGE = Path(os.environ.get("TTS_EDGE", str(HERE.parent / "bin" / "tts-edge")))
-# 前端单文件：默认仓库根 ./index.html（部署时 rsync 到 REMOTE_ROOT/index.html）。
-# 让后端自己把页面发出去 → eng.panyifeng.xyz 同域托管前端，不再依赖 GitHub Pages。
-FRONTEND_HTML = Path(os.environ.get("FRONTEND_HTML", str(HERE.parent / "index.html")))
+# 前端：默认仓库根 ./index.html + ./app.js + ./vendor/（部署时 rsync 到 REMOTE_ROOT/）。
+# 后端同域托管全部前端资源 → 墙内无需代理、不依赖 Google Fonts/unpkg/CDN（否则渲染阻塞十几秒）。
+FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR", str(HERE.parent)))
+FRONTEND_HTML = FRONTEND_DIR / "index.html"
+APP_JS = FRONTEND_DIR / "app.js"
+VENDOR_DIR = FRONTEND_DIR / "vendor"
 
 # style / accent 复用 CLI 版本一致定义
 STYLE_HINTS = {
@@ -320,11 +324,25 @@ class SummaryReq(BaseModel):
 
 @app.get("/")
 def index():
-    """同域托管前端单文件。不在 /api/ 下 → 不被 token 中间件拦（页面要先能打开再填 token）。"""
+    """同域托管前端。不在 /api/ 下 → 不被 token 中间件拦（页面要先能打开再填 token）。"""
     if FRONTEND_HTML.exists():
         return FileResponse(str(FRONTEND_HTML), media_type="text/html",
                             headers={"Cache-Control": "no-cache"})
     raise HTTPException(status_code=404, detail="frontend index.html 未部署到服务器")
+
+
+@app.get("/app.js")
+def app_js():
+    """预编译后的前端逻辑（由 app.src.jsx → build.sh 生成），no-cache 便于更新即时生效。"""
+    if APP_JS.exists():
+        return FileResponse(str(APP_JS), media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache"})
+    raise HTTPException(status_code=404, detail="app.js 未部署（在本地跑 ./build.sh 再部署）")
+
+
+# 第三方库（react / react-dom / tailwind）同域托管；可长缓存（内容固定）。
+if VENDOR_DIR.is_dir():
+    app.mount("/vendor", StaticFiles(directory=str(VENDOR_DIR)), name="vendor")
 
 
 @app.get("/api/health")
