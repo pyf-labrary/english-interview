@@ -1,4 +1,4 @@
-/* built from app.src.jsx — do not edit; run build.sh */
+/* built from app.src.jsx by build.sh — do not edit by hand */
 const {
   useState,
   useEffect,
@@ -36,19 +36,48 @@ const STYLES = [{
 }, {
   id: 'hsbc',
   label: 'HSBC',
-  hint: '汇丰/银行外企 strengths + values'
+  hint: '汇丰/银行外企 strengths'
 }, {
   id: 'strengths',
   label: 'HireVue',
-  hint: '单向自录节奏 30s+90s'
+  hint: '单向自录节奏'
 }, {
   id: 'tech',
   label: 'Tech',
-  hint: 'system design 深挖'
+  hint: '技术深挖'
 }, {
   id: 'behavioral',
   label: 'Behavioural',
   hint: '纯 STAR 行为面'
+}];
+const TOPICS = [{
+  id: 'general',
+  label: '全方位',
+  hint: '综合 · 从零'
+}, {
+  id: 'ai',
+  label: 'AI/LLM',
+  hint: '大模型 / Agent 基础'
+}, {
+  id: 'backend',
+  label: '后端',
+  hint: 'API/DB/缓存/队列'
+}, {
+  id: 'sysdesign',
+  label: '系统设计',
+  hint: '入门级'
+}, {
+  id: 'cs',
+  label: 'CS 基础',
+  hint: '数据结构/OS/网络'
+}, {
+  id: 'behavioral',
+  label: '行为面',
+  hint: 'STAR · 通用'
+}, {
+  id: 'myproj',
+  label: '我的项目',
+  hint: 'Army/网关/runtime'
 }];
 const ACCENTS = [{
   id: 'british',
@@ -71,11 +100,13 @@ const ACCENTS = [{
   label: 'Panel',
   hint: '混口音'
 }];
+const COUNTS = [4, 6, 8, 10, 15, 20];
 function pickMime() {
   const cand = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/aac', 'audio/ogg;codecs=opus'];
   for (const m of cand) if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
   return '';
 }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 function useToast() {
   const [msg, setMsg] = useState(null);
   const show = (m, ms = 2500) => {
@@ -134,7 +165,9 @@ function Pill({
   }, hint));
 }
 function App() {
-  const [style, setStyle] = useState(localStorage.getItem('style') || 'hsbc');
+  const [mode, setMode] = useState(localStorage.getItem('mode') || 'practice');
+  const [style, setStyle] = useState(localStorage.getItem('style') || 'mixed');
+  const [topic, setTopic] = useState(localStorage.getItem('topic') || 'general');
   const [accent, setAccent] = useState(localStorage.getItem('accent') || 'british');
   const [nQuestions, setNQuestions] = useState(Number(localStorage.getItem('nq')) || 6);
   const [apiBase, setApiBase] = useState(API_BASE);
@@ -151,8 +184,14 @@ function App() {
   const [pendingNext, setPendingNext] = useState(null);
   const toast = useToast();
   useEffect(() => {
+    localStorage.setItem('mode', mode);
+  }, [mode]);
+  useEffect(() => {
     localStorage.setItem('style', style);
   }, [style]);
+  useEffect(() => {
+    localStorage.setItem('topic', topic);
+  }, [topic]);
   useEffect(() => {
     localStorage.setItem('accent', accent);
   }, [accent]);
@@ -186,16 +225,20 @@ function App() {
   const stoppingRef = useRef(false);
   const submittedRef = useRef(false);
   const srRestartsRef = useRef(0);
-  const startInterview = async () => {
+  const guard = () => {
     if (!apiBase) {
       setShowSettings(true);
-      return;
+      return false;
     }
     if (!AUTH_TOKEN) {
       setError('未授权：缺少 token。请用 magic link 重新访问，或在 ⚙ 设置里填 token。');
       setPhase('error');
-      return;
+      return false;
     }
+    return true;
+  };
+  const startInterview = async () => {
+    if (!guard()) return;
     setPhase('starting');
     setError(null);
     setHistory([]);
@@ -211,6 +254,7 @@ function App() {
         body: JSON.stringify({
           style,
           accent,
+          topic,
           questions: nQuestions
         })
       });
@@ -375,7 +419,8 @@ function App() {
           body: JSON.stringify({
             transcript: j.transcript || transcript,
             style,
-            accent
+            accent,
+            topic
           })
         });
         if (r2.ok) setSummary(await r2.json());
@@ -394,6 +439,7 @@ function App() {
           text,
           style,
           accent,
+          topic,
           questions: nQuestions,
           idx: idx + 1,
           transcript,
@@ -423,6 +469,7 @@ function App() {
     fd.append('audio', blob, `ans.${ext}`);
     fd.append('style', style);
     fd.append('accent', accent);
+    fd.append('topic', topic);
     fd.append('questions', String(nQuestions));
     fd.append('idx', String(idx + 1));
     fd.append('transcript', transcript);
@@ -432,6 +479,32 @@ function App() {
         method: 'POST',
         headers: authHeaders(),
         body: fd
+      });
+      if (!r.ok) throw new Error(await r.text());
+      await applyTurnResult(await r.json());
+    } catch (e) {
+      setError(String(e.message || e));
+      setPhase('error');
+    }
+  };
+  const skipQuestion = async () => {
+    if (phase === 'recording') return;
+    setPhase('uploading');
+    try {
+      const r = await fetch(apiBase + '/api/skip', {
+        method: 'POST',
+        headers: authHeaders({
+          'Content-Type': 'application/json'
+        }),
+        body: JSON.stringify({
+          style,
+          accent,
+          topic,
+          questions: nQuestions,
+          idx: idx + 1,
+          transcript,
+          current_question: question || ''
+        })
       });
       if (!r.ok) throw new Error(await r.text());
       await applyTurnResult(await r.json());
@@ -459,7 +532,139 @@ function App() {
       setPhase('finished');
     }
   };
+  const [dialogue, setDialogue] = useState([]);
+  const [sparIdx, setSparIdx] = useState(-1);
+  const [sparPlaying, setSparPlaying] = useState(false);
+  const [showZh, setShowZh] = useState(true);
+  const dialogueRef = useRef([]);
+  const sparRunRef = useRef(0);
+  const sparAudioRef = useRef(null);
+  const ttsCacheRef = useRef(new Map());
+  const curBubbleRef = useRef(null);
+  const stopSparAudio = () => {
+    sparRunRef.current++;
+    const a = sparAudioRef.current;
+    if (a) {
+      try {
+        a.pause();
+      } catch {}
+      sparAudioRef.current = null;
+    }
+  };
+  const ttsFor = async i => {
+    const dlg = dialogueRef.current;
+    if (!dlg || !dlg[i]) return null;
+    if (ttsCacheRef.current.has(i)) return ttsCacheRef.current.get(i);
+    try {
+      const r = await fetch(apiBase + '/api/tts', {
+        method: 'POST',
+        headers: authHeaders({
+          'Content-Type': 'application/json'
+        }),
+        body: JSON.stringify({
+          text: dlg[i].en,
+          accent,
+          role: dlg[i].role
+        })
+      });
+      if (!r.ok) throw new Error('tts');
+      const j = await r.json();
+      const url = audioFromB64(j.audio_b64);
+      ttsCacheRef.current.set(i, url);
+      return url;
+    } catch {
+      return null;
+    }
+  };
+  const prefetch = i => {
+    const dlg = dialogueRef.current;
+    if (dlg && dlg[i] && !ttsCacheRef.current.has(i)) ttsFor(i);
+  };
+  const playUrl = url => new Promise(resolve => {
+    const a = new Audio(url);
+    sparAudioRef.current = a;
+    a.onended = () => resolve();
+    a.onerror = () => resolve();
+    a.play().catch(() => resolve());
+  });
+  const playFrom = async start => {
+    const run = ++sparRunRef.current;
+    setSparPlaying(true);
+    const dlg = dialogueRef.current;
+    for (let i = start; i < dlg.length; i++) {
+      if (run !== sparRunRef.current) return;
+      setSparIdx(i);
+      prefetch(i + 1);
+      const url = await ttsFor(i);
+      if (run !== sparRunRef.current) return;
+      if (url) await playUrl(url);
+      if (run !== sparRunRef.current) return;
+      await sleep(280);
+    }
+    if (run === sparRunRef.current) setSparPlaying(false);
+  };
+  const startSpar = async () => {
+    if (!guard()) return;
+    stopSparAudio();
+    ttsCacheRef.current = new Map();
+    setDialogue([]);
+    dialogueRef.current = [];
+    setSparIdx(-1);
+    setSparPlaying(false);
+    setError(null);
+    setPhase('sparLoading');
+    try {
+      const r = await fetch(apiBase + '/api/spar', {
+        method: 'POST',
+        headers: authHeaders({
+          'Content-Type': 'application/json'
+        }),
+        body: JSON.stringify({
+          style,
+          accent,
+          topic,
+          rounds: nQuestions
+        })
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const j = await r.json();
+      const dlg = (j.dialogue || []).filter(d => d && d.en);
+      if (!dlg.length) throw new Error('对话为空');
+      dialogueRef.current = dlg;
+      setDialogue(dlg);
+      setPhase('spar');
+      playFrom(0);
+    } catch (e) {
+      setError(String(e.message || e));
+      setPhase('error');
+    }
+  };
+  const pauseSpar = () => {
+    stopSparAudio();
+    setSparPlaying(false);
+  };
+  const resumeSpar = () => {
+    if (dialogueRef.current.length) playFrom(Math.max(0, sparIdx));
+  };
+  const replaySparLine = () => {
+    stopSparAudio();
+    playFrom(Math.max(0, sparIdx));
+  };
+  const jumpSparLine = i => {
+    stopSparAudio();
+    setSparIdx(i);
+    playFrom(i);
+  };
+  useEffect(() => {
+    if (phase === 'spar' && curBubbleRef.current) {
+      curBubbleRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      });
+    }
+  }, [sparIdx, phase]);
   const reset = () => {
+    stopSparAudio();
     setPhase('idle');
     setIdx(0);
     setQuestion(null);
@@ -472,7 +677,15 @@ function App() {
     setPendingNext(null);
     setLiveText('');
     setInterimText('');
+    setDialogue([]);
+    dialogueRef.current = [];
+    setSparIdx(-1);
+    setSparPlaying(false);
   };
+  const styleLabel = STYLES.find(s => s.id === style)?.label;
+  const topicLabel = TOPICS.find(t => t.id === topic)?.label;
+  const accentLabel = ACCENTS.find(a => a.id === accent)?.label;
+  const sparDone = phase === 'spar' && !sparPlaying && sparIdx >= dialogue.length - 1;
   return React.createElement("div", {
     className: "min-h-full flex flex-col"
   }, toast.node, React.createElement("header", {
@@ -490,18 +703,35 @@ function App() {
     className: "px-5 py-4 border-b border-[var(--line)] bg-[var(--ink-2)] space-y-3"
   }, React.createElement("div", null, React.createElement("div", {
     className: "text-[10px] tracking-widest text-[var(--muted)] mb-2 mono"
-  }, "BACKEND API"), React.createElement("input", {
-    value: apiBase,
-    onChange: e => setApiBase(e.target.value.trim()),
-    placeholder: "https://xxx.trycloudflare.com",
-    className: "w-full px-3 py-2 rounded bg-[var(--ink-3)] border border-[var(--line)] text-sm mono"
-  }), React.createElement("button", {
+  }, "MODE \u6A21\u5F0F"), React.createElement("div", {
+    className: "flex gap-2"
+  }, React.createElement("button", {
     onClick: () => {
-      localStorage.setItem('apiBase', apiBase);
-      toast.show('已保存');
+      reset();
+      setMode('practice');
     },
-    className: "mt-2 px-3 py-1.5 rounded bg-white text-[var(--ink)] text-xs font-semibold"
-  }, "\u4FDD\u5B58")), React.createElement("div", null, React.createElement("div", {
+    className: "flex-1 px-3 py-2 rounded text-sm border " + (mode === 'practice' ? "bg-white text-[var(--ink)] border-white font-semibold" : "border-[var(--line)] text-[var(--muted)]")
+  }, "\uD83C\uDFA4 \u81EA\u5DF1\u7EC3", React.createElement("div", {
+    className: "text-[10px] opacity-60"
+  }, "\u4F60\u7B54 \xB7 AI \u8BC4 \xB7 \u770B\u8303\u7B54")), React.createElement("button", {
+    onClick: () => {
+      reset();
+      setMode('spar');
+    },
+    className: "flex-1 px-3 py-2 rounded text-sm border " + (mode === 'spar' ? "bg-white text-[var(--ink)] border-white font-semibold" : "border-[var(--line)] text-[var(--muted)]")
+  }, "\uD83D\uDC65 AI \u5BF9\u7EC3", React.createElement("div", {
+    className: "text-[10px] opacity-60"
+  }, "\u4E24\u4E2A AI \u5BF9\u7B54 \xB7 \u4F60\u542C\u5B66")))), React.createElement("div", null, React.createElement("div", {
+    className: "text-[10px] tracking-widest text-[var(--muted)] mb-2 mono"
+  }, "TOPIC \u8303\u56F4"), React.createElement("div", {
+    className: "flex flex-wrap gap-2"
+  }, TOPICS.map(t => React.createElement(Pill, {
+    key: t.id,
+    active: topic === t.id,
+    onClick: () => setTopic(t.id),
+    label: t.label,
+    hint: t.hint
+  })))), React.createElement("div", null, React.createElement("div", {
     className: "text-[10px] tracking-widest text-[var(--muted)] mb-2 mono"
   }, "STYLE \u9762\u8BD5\u98CE\u683C"), React.createElement("div", {
     className: "flex flex-wrap gap-2"
@@ -522,14 +752,31 @@ function App() {
     label: a.label,
     hint: a.hint
   })))), React.createElement("div", {
-    className: "flex items-center gap-3 pt-1"
+    className: "flex items-center gap-2 pt-1 flex-wrap"
   }, React.createElement("span", {
     className: "text-[10px] tracking-widest text-[var(--muted)] mono"
-  }, "\u9898\u6570"), [4, 6, 8].map(n => React.createElement("button", {
+  }, mode === 'spar' ? '轮数' : '题数'), COUNTS.map(n => React.createElement("button", {
     key: n,
     onClick: () => setNQuestions(n),
     className: "px-3 py-1 rounded text-sm border " + (nQuestions === n ? "bg-white text-[var(--ink)] border-white" : "border-[var(--line)] text-[var(--muted)]")
-  }, n)))), React.createElement("main", {
+  }, n)), mode === 'spar' && nQuestions > 12 && React.createElement("span", {
+    className: "text-[10px] text-[var(--muted)]"
+  }, "\uFF08\u5BF9\u7EC3\u6700\u591A 12 \u8F6E\uFF09")), React.createElement("div", {
+    className: "pt-1"
+  }, React.createElement("div", {
+    className: "text-[10px] tracking-widest text-[var(--muted)] mb-2 mono"
+  }, "BACKEND API"), React.createElement("input", {
+    value: apiBase,
+    onChange: e => setApiBase(e.target.value.trim()),
+    placeholder: "https://eng.panyifeng.xyz",
+    className: "w-full px-3 py-2 rounded bg-[var(--ink-3)] border border-[var(--line)] text-sm mono"
+  }), React.createElement("button", {
+    onClick: () => {
+      localStorage.setItem('apiBase', apiBase);
+      toast.show('已保存');
+    },
+    className: "mt-2 px-3 py-1.5 rounded bg-white text-[var(--ink)] text-xs font-semibold"
+  }, "\u4FDD\u5B58"))), React.createElement("main", {
     className: "flex-1 flex flex-col"
   }, phase === 'idle' && React.createElement("div", {
     className: "flex-1 flex flex-col items-center justify-center px-6 text-center"
@@ -537,15 +784,17 @@ function App() {
     className: "text-[10px] tracking-[0.3em] text-[var(--muted)] mono mb-3"
   }, "SESSION READY"), React.createElement("h2", {
     className: "serif text-3xl mb-2"
-  }, "\u300C", STYLES.find(s => s.id === style)?.label, "\u300D\u9762 \xB7 ", ACCENTS.find(a => a.id === accent)?.label), React.createElement("p", {
+  }, topicLabel, " \xB7 ", styleLabel, " \xB7 ", accentLabel), mode === 'practice' ? React.createElement("p", {
     className: "text-[var(--muted)] text-sm max-w-sm mb-8"
-  }, nQuestions, " \u9053\u9898\uFF0C\u5168\u82F1\u4F5C\u7B54\u3002\u6309\u4F4F\u9EA6\u514B\u98CE\u8BF4\u8BDD\uFF0C\u677E\u5F00\u63D0\u4EA4\u3002\u6BCF\u9898\u7ACB\u5373\u83B7\u5F97\u5730\u9053\u6539\u5199 + \u9519\u8BEF\u70B9\u8BC4 + \u8BC4\u5206\u3002"), React.createElement("button", {
-    onClick: startInterview,
+  }, nQuestions, " \u9053\u9898\uFF0C\u5168\u82F1\u4F5C\u7B54\u3002\u6309\u4F4F\u9EA6\u514B\u98CE\u8BF4\u8BDD\uFF0C\u677E\u5F00\u63D0\u4EA4\u3002\u6BCF\u9898\u7ACB\u5373\u83B7\u5F97\u8303\u7B54 + \u5730\u9053\u6539\u5199 + \u9519\u8BEF\u70B9\u8BC4 + \u8BC4\u5206\u3002\u4E0D\u4F1A\u7B54\uFF1F\u4E00\u952E\u300C\u770B\u8303\u7B54\u300D\u3002") : React.createElement("p", {
+    className: "text-[var(--muted)] text-sm max-w-sm mb-8"
+  }, "AI \u9762\u8BD5\u5B98 \xD7 AI \u8003\u751F\u73B0\u573A\u5BF9\u7B54 ", Math.min(nQuestions, 12), " \u8F6E\uFF0C\u53CC\u58F0\u7EBF TTS\u3002\u4F60\u53EA\u7BA1\u542C + \u770B\u4E2D\u82F1\u5B57\u5E55\uFF0C\u5B66\u4ED6\u4EEC\u600E\u4E48\u95EE\u3001\u600E\u4E48\u7B54\u3002"), React.createElement("button", {
+    onClick: mode === 'practice' ? startInterview : startSpar,
     disabled: !apiBase,
     className: "px-8 py-3 rounded-full bg-[var(--hsbc)] hover:opacity-90 disabled:opacity-30 text-white serif text-lg tracking-wide"
-  }, "Begin Interview"), !apiBase && React.createElement("p", {
+  }, mode === 'practice' ? 'Begin Interview' : '▶ 开始对练观摩'), !apiBase && React.createElement("p", {
     className: "text-xs text-[var(--muted)] mt-4"
-  }, "\u5148\u5230 \u2699 \u8BBE\u7F6E\u91CC\u586B\u540E\u7AEF\u5730\u5740")), (phase === 'starting' || phase === 'uploading') && React.createElement("div", {
+  }, "\u5148\u5230 \u2699 \u8BBE\u7F6E\u91CC\u586B\u540E\u7AEF\u5730\u5740")), (phase === 'starting' || phase === 'uploading' || phase === 'sparLoading') && React.createElement("div", {
     className: "flex-1 flex flex-col items-center justify-center text-center"
   }, React.createElement("div", {
     className: "bar"
@@ -557,7 +806,7 @@ function App() {
     className: "bar"
   }), React.createElement("p", {
     className: "text-[var(--muted)] text-sm mt-4"
-  }, phase === 'starting' ? '面试官正在准备问题…' : '正在转写 + 评分…')), (phase === 'listening' || phase === 'recording') && question && React.createElement("div", {
+  }, phase === 'starting' ? '面试官正在准备问题…' : phase === 'sparLoading' ? 'AI 们正在准备对话…（多轮稍等几秒）' : '正在处理…')), (phase === 'listening' || phase === 'recording') && question && React.createElement("div", {
     className: "flex-1 flex flex-col"
   }, React.createElement("section", {
     className: "grain p-6 border-b border-[var(--line)]"
@@ -591,7 +840,10 @@ function App() {
     className: "mt-6 text-[var(--muted)] text-sm"
   }, phase === 'recording' ? React.createElement("span", {
     className: "blink"
-  }, "\u25CF \u5F55\u97F3\u4E2D \u2014 \u677E\u5F00\u63D0\u4EA4") : '按住说话'), phase === 'recording' && (liveText || interimText) && React.createElement("div", {
+  }, "\u25CF \u5F55\u97F3\u4E2D \u2014 \u677E\u5F00\u63D0\u4EA4") : '按住说话'), phase === 'listening' && React.createElement("button", {
+    onClick: skipQuestion,
+    className: "mt-5 px-5 py-2 rounded-full border border-[var(--gold)] text-[var(--gold)] text-sm hover:bg-[var(--gold)] hover:text-[var(--ink)] transition-colors"
+  }, "\uD83D\uDE48 \u4E0D\u4F1A \xB7 \u76F4\u63A5\u770B\u8303\u7B54"), phase === 'recording' && (liveText || interimText) && React.createElement("div", {
     className: "mt-6 mx-5 max-w-2xl"
   }, React.createElement("div", {
     className: "text-[10px] mono tracking-widest text-[var(--gold)] mb-2"
@@ -603,7 +855,7 @@ function App() {
     className: "text-[10px] text-[var(--muted)] mt-1.5"
   }, "\u6D4F\u89C8\u5668\u5B9E\u65F6\u8BC6\u522B\uFF0C\u677E\u5F00\u5373\u4F5C\u4E3A\u8BC4\u5206\u4F9D\u636E\uFF1B\u8BC6\u522B\u4E0D\u5230\u65F6\u81EA\u52A8\u56DE\u843D\u670D\u52A1\u5668\u8F6C\u5199")), phase === 'recording' && !SR && React.createElement("div", {
     className: "mt-4 text-[10px] text-[var(--muted)] italic"
-  }, "\uFF08\u6B64\u6D4F\u89C8\u5668\u4E0D\u652F\u6301 Web Speech\uFF0C\u65E0\u5B9E\u65F6\u5B57\u5E55\u3002\u5EFA\u8BAE\u7528 iOS Safari / Chrome / Edge\uFF09"))), phase === 'reviewing' && history.length > 0 && React.createElement("div", {
+  }, "\uFF08\u6B64\u6D4F\u89C8\u5668\u4E0D\u652F\u6301 Web Speech\uFF0C\u65E0\u5B9E\u65F6\u5B57\u5E55\u3002\u5EFA\u8BAE\u7528 Chrome / Edge\uFF09"))), phase === 'reviewing' && history.length > 0 && React.createElement("div", {
     className: "flex-1 flex flex-col"
   }, React.createElement("div", {
     className: "px-5 py-4 overflow-y-auto flex-1 pb-safe"
@@ -645,7 +897,61 @@ function App() {
   }))), React.createElement("button", {
     onClick: reset,
     className: "mt-8 w-full py-3 rounded-full border border-[var(--line)] hover:border-white"
-  }, "Restart Drill")), phase === 'error' && React.createElement("div", {
+  }, "Restart Drill")), phase === 'spar' && React.createElement("div", {
+    className: "flex-1 flex flex-col"
+  }, React.createElement("div", {
+    className: "px-5 py-3 border-b border-[var(--line)] flex items-center justify-between"
+  }, React.createElement("div", {
+    className: "text-[10px] mono tracking-widest text-[var(--gold)]"
+  }, "AI \u5BF9\u7EC3 \xB7 ", topicLabel, " \xB7 ", Math.min(dialogue.length / 2 | 0 || 0, 99), " \u8F6E"), React.createElement("div", {
+    className: "flex items-center gap-3"
+  }, React.createElement("button", {
+    onClick: () => setShowZh(z => !z),
+    className: "text-xs text-[var(--muted)] hover:text-white"
+  }, showZh ? '中/EN' : 'EN only'), React.createElement("button", {
+    onClick: reset,
+    className: "text-xs text-[var(--muted)] hover:text-white"
+  }, "\u2715 \u9000\u51FA"))), React.createElement("div", {
+    className: "flex-1 overflow-y-auto px-4 py-4 space-y-3"
+  }, dialogue.map((d, i) => {
+    if (i > sparIdx) return null;
+    const isInt = d.role === 'interviewer';
+    const cur = i === sparIdx;
+    return React.createElement("div", {
+      key: i,
+      ref: cur ? curBubbleRef : null,
+      className: "flex " + (isInt ? "justify-start" : "justify-end")
+    }, React.createElement("div", {
+      onClick: () => jumpSparLine(i),
+      className: "max-w-[85%] rounded-2xl px-4 py-3 cursor-pointer transition-all border " + (isInt ? "bg-[var(--ink-2)] border-[var(--line)] rounded-tl-sm " : "bg-[var(--ink-3)] border-[var(--line)] rounded-tr-sm ") + (cur ? "ring-2 ring-[var(--gold)]" : "opacity-90")
+    }, React.createElement("div", {
+      className: "text-[10px] mono tracking-widest mb-1 " + (isInt ? "text-[var(--hsbc)]" : "text-[var(--teal)]")
+    }, isInt ? '面试官 INTERVIEWER' : '考生 CANDIDATE', cur && sparPlaying ? ' · 🔊' : ''), React.createElement("p", {
+      className: "serif leading-relaxed"
+    }, d.en), showZh && d.zh && React.createElement("p", {
+      className: "text-sm text-[var(--muted)] mt-1.5"
+    }, d.zh)));
+  }), sparDone && React.createElement("div", {
+    className: "text-center text-[var(--muted)] text-sm py-4"
+  }, "\u2014 \u5BF9\u7EC3\u7ED3\u675F \xB7 \u70B9\u4EFB\u610F\u4E00\u53E5\u53EF\u91CD\u542C \u2014")), React.createElement("div", {
+    className: "px-5 pb-safe pt-3 border-t border-[var(--line)] bg-[var(--ink)] flex items-center justify-center gap-5"
+  }, React.createElement("button", {
+    onClick: replaySparLine,
+    title: "\u91CD\u542C\u672C\u53E5",
+    className: "w-11 h-11 rounded-full border border-[var(--line)] hover:border-white flex items-center justify-center"
+  }, "\u23EE"), sparPlaying ? React.createElement("button", {
+    onClick: pauseSpar,
+    className: "w-14 h-14 rounded-full bg-[var(--hsbc)] text-white flex items-center justify-center text-xl"
+  }, "\u23F8") : React.createElement("button", {
+    onClick: sparDone ? startSpar : resumeSpar,
+    className: "w-14 h-14 rounded-full bg-[var(--hsbc)] text-white flex items-center justify-center text-xl"
+  }, sparDone ? '↻' : '▶'), React.createElement("button", {
+    onClick: () => jumpSparLine(Math.min(dialogue.length - 1, sparIdx + 1)),
+    title: "\u4E0B\u4E00\u53E5",
+    className: "w-11 h-11 rounded-full border border-[var(--line)] hover:border-white flex items-center justify-center"
+  }, "\u23ED"), React.createElement("span", {
+    className: "text-[10px] mono text-[var(--muted)] ml-2"
+  }, Math.max(0, sparIdx + 1), "/", dialogue.length))), phase === 'error' && React.createElement("div", {
     className: "flex-1 flex flex-col items-center justify-center px-6 text-center"
   }, React.createElement("div", {
     className: "text-[var(--hsbc)] serif text-2xl mb-2"
@@ -662,25 +968,44 @@ function FeedbackCard({
 }) {
   const fb = item.feedback;
   if (!fb) return null;
+  const skipped = fb.skipped;
   return React.createElement("div", {
     className: "bg-[var(--ink-2)] border border-[var(--line)] rounded-lg p-4 mb-3"
   }, React.createElement("div", {
     className: "flex items-center justify-between mb-2"
   }, React.createElement("span", {
     className: "text-[10px] mono tracking-widest text-[var(--muted)]"
-  }, "Q", item.idx), React.createElement("div", {
+  }, "Q", item.idx), skipped ? React.createElement("span", {
+    className: "text-[10px] mono tracking-widest text-[var(--gold)] border border-[var(--gold)] rounded px-2 py-0.5"
+  }, "\u5DF2\u8DF3\u8FC7 \xB7 \u8303\u7B54") : React.createElement("div", {
     className: "w-40"
   }, React.createElement(ScoreBar, {
     score: fb.score
   }))), expanded && item.question && React.createElement("p", {
     className: "serif text-sm mb-2 text-[var(--muted)]"
-  }, "Q: ", item.question), item.sttText && React.createElement("div", {
+  }, "Q: ", item.question), item.sttText && !skipped && React.createElement("div", {
     className: "text-sm text-[var(--muted)] italic mb-3 border-l-2 border-[var(--line)] pl-3"
-  }, item.sttText), fb.rewrite && React.createElement("div", {
+  }, "\u4F60\u7684\u56DE\u7B54\uFF1A", item.sttText), fb.model_answer && React.createElement("div", {
+    className: "mb-3"
+  }, React.createElement("div", {
+    className: "text-[10px] mono tracking-widest text-[var(--gold)] mb-1"
+  }, "MODEL ANSWER \xB7 \u8303\u7B54"), React.createElement("p", {
+    className: "serif leading-relaxed"
+  }, fb.model_answer), fb.model_answer_zh && React.createElement("p", {
+    className: "text-sm text-[var(--muted)] mt-1.5"
+  }, fb.model_answer_zh)), fb.key_points_zh && fb.key_points_zh.length > 0 && React.createElement("div", {
     className: "mb-3"
   }, React.createElement("div", {
     className: "text-[10px] mono tracking-widest text-[var(--teal)] mb-1"
-  }, "NATIVE REWRITE"), React.createElement("p", {
+  }, "\u7B54\u9898\u8981\u70B9"), React.createElement("ul", {
+    className: "text-sm space-y-1"
+  }, fb.key_points_zh.map((e, i) => React.createElement("li", {
+    key: i
+  }, "\u2022 ", e)))), fb.rewrite && React.createElement("div", {
+    className: "mb-3"
+  }, React.createElement("div", {
+    className: "text-[10px] mono tracking-widest text-[var(--teal)] mb-1"
+  }, "NATIVE REWRITE \xB7 \u4F60\u7684\u8BDD\u6539\u5199"), React.createElement("p", {
     className: "serif"
   }, fb.rewrite)), fb.errors && fb.errors.length > 0 && React.createElement("div", {
     className: "mb-3"
@@ -691,6 +1016,14 @@ function FeedbackCard({
   }, fb.errors.map((e, i) => React.createElement("li", {
     key: i,
     className: "text-[var(--text)]"
+  }, "\u2022 ", e)))), fb.vocab && fb.vocab.length > 0 && React.createElement("div", {
+    className: "mb-3"
+  }, React.createElement("div", {
+    className: "text-[10px] mono tracking-widest text-[var(--gold)] mb-1"
+  }, "\u5730\u9053\u8868\u8FBE"), React.createElement("ul", {
+    className: "text-sm space-y-1"
+  }, fb.vocab.map((e, i) => React.createElement("li", {
+    key: i
   }, "\u2022 ", e)))), fb.coach_zh && React.createElement("div", null, React.createElement("div", {
     className: "text-[10px] mono tracking-widest text-[var(--gold)] mb-1"
   }, "\u6559\u7EC3"), React.createElement("p", {

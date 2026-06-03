@@ -27,10 +27,21 @@ function authHeaders(extra) {
 
 const STYLES = [
   { id: 'mixed',      label: 'Mixed',      hint: '综合面' },
-  { id: 'hsbc',       label: 'HSBC',       hint: '汇丰/银行外企 strengths + values' },
-  { id: 'strengths',  label: 'HireVue',    hint: '单向自录节奏 30s+90s' },
-  { id: 'tech',       label: 'Tech',       hint: 'system design 深挖' },
+  { id: 'hsbc',       label: 'HSBC',       hint: '汇丰/银行外企 strengths' },
+  { id: 'strengths',  label: 'HireVue',    hint: '单向自录节奏' },
+  { id: 'tech',       label: 'Tech',       hint: '技术深挖' },
   { id: 'behavioral', label: 'Behavioural', hint: '纯 STAR 行为面' },
+];
+
+// 面试范围/题材（决定问什么）—— 全方位，不再死磕个人项目
+const TOPICS = [
+  { id: 'general',    label: '全方位',   hint: '综合 · 从零' },
+  { id: 'ai',         label: 'AI/LLM',  hint: '大模型 / Agent 基础' },
+  { id: 'backend',    label: '后端',     hint: 'API/DB/缓存/队列' },
+  { id: 'sysdesign',  label: '系统设计', hint: '入门级' },
+  { id: 'cs',         label: 'CS 基础',  hint: '数据结构/OS/网络' },
+  { id: 'behavioral', label: '行为面',   hint: 'STAR · 通用' },
+  { id: 'myproj',     label: '我的项目', hint: 'Army/网关/runtime' },
 ];
 
 const ACCENTS = [
@@ -41,6 +52,8 @@ const ACCENTS = [
   { id: 'mixed',      label: 'Panel', hint: '混口音' },
 ];
 
+const COUNTS = [4, 6, 8, 10, 15, 20];
+
 function pickMime() {
   const cand = [
     'audio/webm;codecs=opus', 'audio/webm', 'audio/mp4;codecs=mp4a.40.2',
@@ -49,6 +62,8 @@ function pickMime() {
   for (const m of cand) if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
   return '';
 }
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // 简易 toast
 function useToast() {
@@ -99,14 +114,16 @@ function Pill({ active, onClick, label, hint }) {
 
 function App() {
   // 设置
-  const [style, setStyle] = useState(localStorage.getItem('style') || 'hsbc');
+  const [mode, setMode] = useState(localStorage.getItem('mode') || 'practice'); // practice | spar
+  const [style, setStyle] = useState(localStorage.getItem('style') || 'mixed');
+  const [topic, setTopic] = useState(localStorage.getItem('topic') || 'general');
   const [accent, setAccent] = useState(localStorage.getItem('accent') || 'british');
   const [nQuestions, setNQuestions] = useState(Number(localStorage.getItem('nq')) || 6);
   const [apiBase, setApiBase] = useState(API_BASE);
   const [showSettings, setShowSettings] = useState(!apiBase);
 
-  // 状态机
-  // idle → starting → listening → recording → uploading → reviewing → (listening | finishing | finished) → error
+  // 状态机（练习）：idle → starting → listening → recording → uploading → reviewing → finished → error
+  // 对练：idle → sparLoading → spar
   const [phase, setPhase] = useState('idle');
   const [idx, setIdx] = useState(0);          // 已答 idx 题
   const [question, setQuestion] = useState(null);
@@ -120,11 +137,13 @@ function App() {
   const [pendingNext, setPendingNext] = useState(null);
   const toast = useToast();
 
+  useEffect(() => { localStorage.setItem('mode', mode); }, [mode]);
   useEffect(() => { localStorage.setItem('style', style); }, [style]);
+  useEffect(() => { localStorage.setItem('topic', topic); }, [topic]);
   useEffect(() => { localStorage.setItem('accent', accent); }, [accent]);
   useEffect(() => { localStorage.setItem('nq', String(nQuestions)); }, [nQuestions]);
 
-  // 自动播放面试官 TTS
+  // 自动播放面试官 TTS（练习模式）
   const audioRef = useRef(null);
   useEffect(() => {
     if (!audioUrl) return;
@@ -152,19 +171,24 @@ function App() {
   const submittedRef = useRef(false); // 本轮已提交，防重复
   const srRestartsRef = useRef(0);    // SR 中途 end 后重启计数（防死循环）
 
-  const startInterview = async () => {
-    if (!apiBase) { setShowSettings(true); return; }
+  const guard = () => {
+    if (!apiBase) { setShowSettings(true); return false; }
     if (!AUTH_TOKEN) {
       setError('未授权：缺少 token。请用 magic link 重新访问，或在 ⚙ 设置里填 token。');
-      setPhase('error'); return;
+      setPhase('error'); return false;
     }
+    return true;
+  };
+
+  const startInterview = async () => {
+    if (!guard()) return;
     setPhase('starting'); setError(null); setHistory([]); setSummary(null);
     setIdx(0); setTranscript('');
     try {
       const r = await fetch(apiBase + '/api/start', {
         method: 'POST',
         headers: authHeaders({'Content-Type': 'application/json'}),
-        body: JSON.stringify({ style, accent, questions: nQuestions }),
+        body: JSON.stringify({ style, accent, topic, questions: nQuestions }),
       });
       if (!r.ok) throw new Error(await r.text());
       const j = await r.json();
@@ -275,7 +299,7 @@ function App() {
     // 否则快速点按 / 首次授权竞态下（录音器还没建好）会提前提交并把录音卡死
   };
 
-  // 两条提交路径（文本 / 音频）共用的结果落地
+  // 两条提交路径（文本 / 音频 / 跳过）共用的结果落地
   const applyTurnResult = async (j) => {
     setTranscript(j.transcript || transcript);
     setHistory(h => [...h, {
@@ -293,7 +317,7 @@ function App() {
         const r2 = await fetch(apiBase + '/api/summary', {
           method: 'POST',
           headers: authHeaders({'Content-Type': 'application/json'}),
-          body: JSON.stringify({ transcript: j.transcript || transcript, style, accent }),
+          body: JSON.stringify({ transcript: j.transcript || transcript, style, accent, topic }),
         });
         if (r2.ok) setSummary(await r2.json());
       } catch {}
@@ -308,7 +332,7 @@ function App() {
         method: 'POST',
         headers: authHeaders({'Content-Type': 'application/json'}),
         body: JSON.stringify({
-          text, style, accent, questions: nQuestions,
+          text, style, accent, topic, questions: nQuestions,
           idx: idx + 1, transcript, current_question: question || '',
         }),
       });
@@ -337,6 +361,7 @@ function App() {
     fd.append('audio', blob, `ans.${ext}`);
     fd.append('style', style);
     fd.append('accent', accent);
+    fd.append('topic', topic);
     fd.append('questions', String(nQuestions));
     fd.append('idx', String(idx + 1));
     fd.append('transcript', transcript);
@@ -344,6 +369,26 @@ function App() {
     try {
       const r = await fetch(apiBase + '/api/turn', {
         method: 'POST', headers: authHeaders(), body: fd,
+      });
+      if (!r.ok) throw new Error(await r.text());
+      await applyTurnResult(await r.json());
+    } catch (e) {
+      setError(String(e.message || e)); setPhase('error');
+    }
+  };
+
+  // 一键跳过 → 直接看范答（不会答的题）
+  const skipQuestion = async () => {
+    if (phase === 'recording') return;
+    setPhase('uploading');
+    try {
+      const r = await fetch(apiBase + '/api/skip', {
+        method: 'POST',
+        headers: authHeaders({'Content-Type': 'application/json'}),
+        body: JSON.stringify({
+          style, accent, topic, questions: nQuestions,
+          idx: idx + 1, transcript, current_question: question || '',
+        }),
       });
       if (!r.ok) throw new Error(await r.text());
       await applyTurnResult(await r.json());
@@ -370,11 +415,119 @@ function App() {
     }
   };
 
+  // ── AI 对练观摩 ─────────────────────────────────────────────────
+  const [dialogue, setDialogue] = useState([]);
+  const [sparIdx, setSparIdx] = useState(-1);
+  const [sparPlaying, setSparPlaying] = useState(false);
+  const [showZh, setShowZh] = useState(true);
+  const dialogueRef = useRef([]);
+  const sparRunRef = useRef(0);       // 播放运行 token，换值即中止旧循环
+  const sparAudioRef = useRef(null);  // 当前播放的 Audio
+  const ttsCacheRef = useRef(new Map()); // 行号 → blob URL
+  const curBubbleRef = useRef(null);
+
+  const stopSparAudio = () => {
+    sparRunRef.current++;                  // 中止任何在跑的 playFrom
+    const a = sparAudioRef.current;
+    if (a) { try { a.pause(); } catch {} sparAudioRef.current = null; }
+  };
+
+  const ttsFor = async (i) => {
+    const dlg = dialogueRef.current;
+    if (!dlg || !dlg[i]) return null;
+    if (ttsCacheRef.current.has(i)) return ttsCacheRef.current.get(i);
+    try {
+      const r = await fetch(apiBase + '/api/tts', {
+        method: 'POST',
+        headers: authHeaders({'Content-Type': 'application/json'}),
+        body: JSON.stringify({ text: dlg[i].en, accent, role: dlg[i].role }),
+      });
+      if (!r.ok) throw new Error('tts');
+      const j = await r.json();
+      const url = audioFromB64(j.audio_b64);
+      ttsCacheRef.current.set(i, url);
+      return url;
+    } catch { return null; }
+  };
+  const prefetch = (i) => {
+    const dlg = dialogueRef.current;
+    if (dlg && dlg[i] && !ttsCacheRef.current.has(i)) ttsFor(i);
+  };
+  const playUrl = (url) => new Promise((resolve) => {
+    const a = new Audio(url);
+    sparAudioRef.current = a;
+    a.onended = () => resolve();
+    a.onerror = () => resolve();
+    a.play().catch(() => resolve());
+  });
+
+  const playFrom = async (start) => {
+    const run = ++sparRunRef.current;
+    setSparPlaying(true);
+    const dlg = dialogueRef.current;
+    for (let i = start; i < dlg.length; i++) {
+      if (run !== sparRunRef.current) return;     // 被中止
+      setSparIdx(i);
+      prefetch(i + 1);
+      const url = await ttsFor(i);
+      if (run !== sparRunRef.current) return;
+      if (url) await playUrl(url);
+      if (run !== sparRunRef.current) return;
+      await sleep(280);                           // 两句之间留个气口
+    }
+    if (run === sparRunRef.current) setSparPlaying(false);
+  };
+
+  const startSpar = async () => {
+    if (!guard()) return;
+    stopSparAudio();
+    ttsCacheRef.current = new Map();
+    setDialogue([]); dialogueRef.current = [];
+    setSparIdx(-1); setSparPlaying(false); setError(null);
+    setPhase('sparLoading');
+    try {
+      const r = await fetch(apiBase + '/api/spar', {
+        method: 'POST',
+        headers: authHeaders({'Content-Type': 'application/json'}),
+        body: JSON.stringify({ style, accent, topic, rounds: nQuestions }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const j = await r.json();
+      const dlg = (j.dialogue || []).filter(d => d && d.en);
+      if (!dlg.length) throw new Error('对话为空');
+      dialogueRef.current = dlg;
+      setDialogue(dlg);
+      setPhase('spar');
+      playFrom(0);
+    } catch (e) {
+      setError(String(e.message || e)); setPhase('error');
+    }
+  };
+
+  const pauseSpar = () => { stopSparAudio(); setSparPlaying(false); };
+  const resumeSpar = () => { if (dialogueRef.current.length) playFrom(Math.max(0, sparIdx)); };
+  const replaySparLine = () => { stopSparAudio(); playFrom(Math.max(0, sparIdx)); };
+  const jumpSparLine = (i) => { stopSparAudio(); setSparIdx(i); playFrom(i); };
+
+  // 当前行滚到可视中央
+  useEffect(() => {
+    if (phase === 'spar' && curBubbleRef.current) {
+      curBubbleRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [sparIdx, phase]);
+
   const reset = () => {
+    stopSparAudio();
     setPhase('idle'); setIdx(0); setQuestion(null); setQuestionZh(null);
     setTranscript(''); setHistory([]); setSummary(null); setAudioUrl(null); setError(null);
     setPendingNext(null); setLiveText(''); setInterimText('');
+    setDialogue([]); dialogueRef.current = []; setSparIdx(-1); setSparPlaying(false);
   };
+
+  const styleLabel = STYLES.find(s=>s.id===style)?.label;
+  const topicLabel = TOPICS.find(t=>t.id===topic)?.label;
+  const accentLabel = ACCENTS.find(a=>a.id===accent)?.label;
+  const sparDone = phase === 'spar' && !sparPlaying && sparIdx >= dialogue.length - 1;
 
   // ── UI ──────────────────────────────────────────────────────────
   return (
@@ -395,12 +548,23 @@ function App() {
       {showSettings && (
         <section className="px-5 py-4 border-b border-[var(--line)] bg-[var(--ink-2)] space-y-3">
           <div>
-            <div className="text-[10px] tracking-widest text-[var(--muted)] mb-2 mono">BACKEND API</div>
-            <input value={apiBase} onChange={e => setApiBase(e.target.value.trim())}
-              placeholder="https://xxx.trycloudflare.com"
-              className="w-full px-3 py-2 rounded bg-[var(--ink-3)] border border-[var(--line)] text-sm mono" />
-            <button onClick={() => { localStorage.setItem('apiBase', apiBase); toast.show('已保存'); }}
-              className="mt-2 px-3 py-1.5 rounded bg-white text-[var(--ink)] text-xs font-semibold">保存</button>
+            <div className="text-[10px] tracking-widest text-[var(--muted)] mb-2 mono">MODE 模式</div>
+            <div className="flex gap-2">
+              <button onClick={()=>{ reset(); setMode('practice'); }}
+                className={"flex-1 px-3 py-2 rounded text-sm border " + (mode==='practice' ? "bg-white text-[var(--ink)] border-white font-semibold" : "border-[var(--line)] text-[var(--muted)]")}>
+                🎤 自己练<div className="text-[10px] opacity-60">你答 · AI 评 · 看范答</div>
+              </button>
+              <button onClick={()=>{ reset(); setMode('spar'); }}
+                className={"flex-1 px-3 py-2 rounded text-sm border " + (mode==='spar' ? "bg-white text-[var(--ink)] border-white font-semibold" : "border-[var(--line)] text-[var(--muted)]")}>
+                👥 AI 对练<div className="text-[10px] opacity-60">两个 AI 对答 · 你听学</div>
+              </button>
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] tracking-widest text-[var(--muted)] mb-2 mono">TOPIC 范围</div>
+            <div className="flex flex-wrap gap-2">
+              {TOPICS.map(t => <Pill key={t.id} active={topic===t.id} onClick={()=>setTopic(t.id)} label={t.label} hint={t.hint}/>)}
+            </div>
           </div>
           <div>
             <div className="text-[10px] tracking-widest text-[var(--muted)] mb-2 mono">STYLE 面试风格</div>
@@ -414,14 +578,23 @@ function App() {
               {ACCENTS.map(a => <Pill key={a.id} active={accent===a.id} onClick={()=>setAccent(a.id)} label={a.label} hint={a.hint}/>)}
             </div>
           </div>
-          <div className="flex items-center gap-3 pt-1">
-            <span className="text-[10px] tracking-widest text-[var(--muted)] mono">题数</span>
-            {[4,6,8].map(n => (
+          <div className="flex items-center gap-2 pt-1 flex-wrap">
+            <span className="text-[10px] tracking-widest text-[var(--muted)] mono">{mode==='spar' ? '轮数' : '题数'}</span>
+            {COUNTS.map(n => (
               <button key={n} onClick={()=>setNQuestions(n)}
                 className={"px-3 py-1 rounded text-sm border " + (nQuestions===n ? "bg-white text-[var(--ink)] border-white" : "border-[var(--line)] text-[var(--muted)]")}>
                 {n}
               </button>
             ))}
+            {mode==='spar' && nQuestions>12 && <span className="text-[10px] text-[var(--muted)]">（对练最多 12 轮）</span>}
+          </div>
+          <div className="pt-1">
+            <div className="text-[10px] tracking-widest text-[var(--muted)] mb-2 mono">BACKEND API</div>
+            <input value={apiBase} onChange={e => setApiBase(e.target.value.trim())}
+              placeholder="https://eng.panyifeng.xyz"
+              className="w-full px-3 py-2 rounded bg-[var(--ink-3)] border border-[var(--line)] text-sm mono" />
+            <button onClick={() => { localStorage.setItem('apiBase', apiBase); toast.show('已保存'); }}
+              className="mt-2 px-3 py-1.5 rounded bg-white text-[var(--ink)] text-xs font-semibold">保存</button>
           </div>
         </section>
       )}
@@ -430,23 +603,29 @@ function App() {
         {phase === 'idle' && (
           <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
             <div className="text-[10px] tracking-[0.3em] text-[var(--muted)] mono mb-3">SESSION READY</div>
-            <h2 className="serif text-3xl mb-2">「{STYLES.find(s=>s.id===style)?.label}」面 · {ACCENTS.find(a=>a.id===accent)?.label}</h2>
-            <p className="text-[var(--muted)] text-sm max-w-sm mb-8">
-              {nQuestions} 道题，全英作答。按住麦克风说话，松开提交。每题立即获得地道改写 + 错误点评 + 评分。
-            </p>
-            <button onClick={startInterview} disabled={!apiBase}
+            <h2 className="serif text-3xl mb-2">{topicLabel} · {styleLabel} · {accentLabel}</h2>
+            {mode==='practice' ? (
+              <p className="text-[var(--muted)] text-sm max-w-sm mb-8">
+                {nQuestions} 道题，全英作答。按住麦克风说话，松开提交。每题立即获得范答 + 地道改写 + 错误点评 + 评分。不会答？一键「看范答」。
+              </p>
+            ) : (
+              <p className="text-[var(--muted)] text-sm max-w-sm mb-8">
+                AI 面试官 × AI 考生现场对答 {Math.min(nQuestions,12)} 轮，双声线 TTS。你只管听 + 看中英字幕，学他们怎么问、怎么答。
+              </p>
+            )}
+            <button onClick={mode==='practice' ? startInterview : startSpar} disabled={!apiBase}
               className="px-8 py-3 rounded-full bg-[var(--hsbc)] hover:opacity-90 disabled:opacity-30 text-white serif text-lg tracking-wide">
-              Begin Interview
+              {mode==='practice' ? 'Begin Interview' : '▶ 开始对练观摩'}
             </button>
             {!apiBase && <p className="text-xs text-[var(--muted)] mt-4">先到 ⚙ 设置里填后端地址</p>}
           </div>
         )}
 
-        {(phase==='starting' || phase==='uploading') && (
+        {(phase==='starting' || phase==='uploading' || phase==='sparLoading') && (
           <div className="flex-1 flex flex-col items-center justify-center text-center">
             <div className="bar"></div><div className="bar"></div><div className="bar"></div><div className="bar"></div>
             <p className="text-[var(--muted)] text-sm mt-4">
-              {phase==='starting' ? '面试官正在准备问题…' : '正在转写 + 评分…'}
+              {phase==='starting' ? '面试官正在准备问题…' : phase==='sparLoading' ? 'AI 们正在准备对话…（多轮稍等几秒）' : '正在处理…'}
             </p>
           </div>
         )}
@@ -479,6 +658,13 @@ function App() {
                 {phase==='recording' ? <span className="blink">● 录音中 — 松开提交</span> : '按住说话'}
               </p>
 
+              {phase==='listening' && (
+                <button onClick={skipQuestion}
+                  className="mt-5 px-5 py-2 rounded-full border border-[var(--gold)] text-[var(--gold)] text-sm hover:bg-[var(--gold)] hover:text-[var(--ink)] transition-colors">
+                  🙈 不会 · 直接看范答
+                </button>
+              )}
+
               {/* 实时字幕（录音时显示，提交后清空） */}
               {phase==='recording' && (liveText || interimText) && (
                 <div className="mt-6 mx-5 max-w-2xl">
@@ -494,11 +680,10 @@ function App() {
               )}
               {phase==='recording' && !SR && (
                 <div className="mt-4 text-[10px] text-[var(--muted)] italic">
-                  （此浏览器不支持 Web Speech，无实时字幕。建议用 iOS Safari / Chrome / Edge）
+                  （此浏览器不支持 Web Speech，无实时字幕。建议用 Chrome / Edge）
                 </div>
               )}
             </div>
-
           </div>
         )}
 
@@ -543,6 +728,66 @@ function App() {
           </div>
         )}
 
+        {phase === 'spar' && (
+          <div className="flex-1 flex flex-col">
+            <div className="px-5 py-3 border-b border-[var(--line)] flex items-center justify-between">
+              <div className="text-[10px] mono tracking-widest text-[var(--gold)]">
+                AI 对练 · {topicLabel} · {Math.min(dialogue.length/2|0 || 0, 99)} 轮
+              </div>
+              <div className="flex items-center gap-3">
+                <button onClick={()=>setShowZh(z=>!z)} className="text-xs text-[var(--muted)] hover:text-white">
+                  {showZh ? '中/EN' : 'EN only'}
+                </button>
+                <button onClick={reset} className="text-xs text-[var(--muted)] hover:text-white">✕ 退出</button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+              {dialogue.map((d, i) => {
+                if (i > sparIdx) return null;            // 还没播到的不显示
+                const isInt = d.role === 'interviewer';
+                const cur = i === sparIdx;
+                return (
+                  <div key={i} ref={cur ? curBubbleRef : null}
+                    className={"flex " + (isInt ? "justify-start" : "justify-end")}>
+                    <div onClick={()=>jumpSparLine(i)}
+                      className={"max-w-[85%] rounded-2xl px-4 py-3 cursor-pointer transition-all border " +
+                        (isInt ? "bg-[var(--ink-2)] border-[var(--line)] rounded-tl-sm "
+                               : "bg-[var(--ink-3)] border-[var(--line)] rounded-tr-sm ") +
+                        (cur ? "ring-2 ring-[var(--gold)]" : "opacity-90")}>
+                      <div className={"text-[10px] mono tracking-widest mb-1 " + (isInt ? "text-[var(--hsbc)]" : "text-[var(--teal)]")}>
+                        {isInt ? '面试官 INTERVIEWER' : '考生 CANDIDATE'}{cur && sparPlaying ? ' · 🔊' : ''}
+                      </div>
+                      <p className="serif leading-relaxed">{d.en}</p>
+                      {showZh && d.zh && <p className="text-sm text-[var(--muted)] mt-1.5">{d.zh}</p>}
+                    </div>
+                  </div>
+                );
+              })}
+              {sparDone && (
+                <div className="text-center text-[var(--muted)] text-sm py-4">— 对练结束 · 点任意一句可重听 —</div>
+              )}
+            </div>
+
+            <div className="px-5 pb-safe pt-3 border-t border-[var(--line)] bg-[var(--ink)] flex items-center justify-center gap-5">
+              <button onClick={replaySparLine} title="重听本句"
+                className="w-11 h-11 rounded-full border border-[var(--line)] hover:border-white flex items-center justify-center">⏮</button>
+              {sparPlaying ? (
+                <button onClick={pauseSpar}
+                  className="w-14 h-14 rounded-full bg-[var(--hsbc)] text-white flex items-center justify-center text-xl">⏸</button>
+              ) : (
+                <button onClick={sparDone ? startSpar : resumeSpar}
+                  className="w-14 h-14 rounded-full bg-[var(--hsbc)] text-white flex items-center justify-center text-xl">
+                  {sparDone ? '↻' : '▶'}
+                </button>
+              )}
+              <button onClick={()=>jumpSparLine(Math.min(dialogue.length-1, sparIdx+1))} title="下一句"
+                className="w-11 h-11 rounded-full border border-[var(--line)] hover:border-white flex items-center justify-center">⏭</button>
+              <span className="text-[10px] mono text-[var(--muted)] ml-2">{Math.max(0,sparIdx+1)}/{dialogue.length}</span>
+            </div>
+          </div>
+        )}
+
         {phase === 'error' && (
           <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
             <div className="text-[var(--hsbc)] serif text-2xl mb-2">⚠ Something broke</div>
@@ -558,23 +803,41 @@ function App() {
 function FeedbackCard({ item, expanded }) {
   const fb = item.feedback;
   if (!fb) return null;
+  const skipped = fb.skipped;
   return (
     <div className="bg-[var(--ink-2)] border border-[var(--line)] rounded-lg p-4 mb-3">
       <div className="flex items-center justify-between mb-2">
         <span className="text-[10px] mono tracking-widest text-[var(--muted)]">Q{item.idx}</span>
-        <div className="w-40"><ScoreBar score={fb.score} /></div>
+        {skipped
+          ? <span className="text-[10px] mono tracking-widest text-[var(--gold)] border border-[var(--gold)] rounded px-2 py-0.5">已跳过 · 范答</span>
+          : <div className="w-40"><ScoreBar score={fb.score} /></div>}
       </div>
       {expanded && item.question && (
         <p className="serif text-sm mb-2 text-[var(--muted)]">Q: {item.question}</p>
       )}
-      {item.sttText && (
+      {item.sttText && !skipped && (
         <div className="text-sm text-[var(--muted)] italic mb-3 border-l-2 border-[var(--line)] pl-3">
-          {item.sttText}
+          你的回答：{item.sttText}
+        </div>
+      )}
+      {fb.model_answer && (
+        <div className="mb-3">
+          <div className="text-[10px] mono tracking-widest text-[var(--gold)] mb-1">MODEL ANSWER · 范答</div>
+          <p className="serif leading-relaxed">{fb.model_answer}</p>
+          {fb.model_answer_zh && <p className="text-sm text-[var(--muted)] mt-1.5">{fb.model_answer_zh}</p>}
+        </div>
+      )}
+      {fb.key_points_zh && fb.key_points_zh.length > 0 && (
+        <div className="mb-3">
+          <div className="text-[10px] mono tracking-widest text-[var(--teal)] mb-1">答题要点</div>
+          <ul className="text-sm space-y-1">
+            {fb.key_points_zh.map((e, i) => <li key={i}>• {e}</li>)}
+          </ul>
         </div>
       )}
       {fb.rewrite && (
         <div className="mb-3">
-          <div className="text-[10px] mono tracking-widest text-[var(--teal)] mb-1">NATIVE REWRITE</div>
+          <div className="text-[10px] mono tracking-widest text-[var(--teal)] mb-1">NATIVE REWRITE · 你的话改写</div>
           <p className="serif">{fb.rewrite}</p>
         </div>
       )}
@@ -583,6 +846,14 @@ function FeedbackCard({ item, expanded }) {
           <div className="text-[10px] mono tracking-widest text-[var(--hsbc)] mb-1">错误点评</div>
           <ul className="text-sm space-y-1">
             {fb.errors.map((e, i) => <li key={i} className="text-[var(--text)]">• {e}</li>)}
+          </ul>
+        </div>
+      )}
+      {fb.vocab && fb.vocab.length > 0 && (
+        <div className="mb-3">
+          <div className="text-[10px] mono tracking-widest text-[var(--gold)] mb-1">地道表达</div>
+          <ul className="text-sm space-y-1">
+            {fb.vocab.map((e, i) => <li key={i}>• {e}</li>)}
           </ul>
         </div>
       )}
