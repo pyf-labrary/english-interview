@@ -263,12 +263,20 @@ function App() {
     if (phase === 'recording') return;
     // 重置本轮协调状态
     liveTextRef.current = ''; blobRef.current = null; mimeRef.current = '';
+    mediaRef.current = null; recogRef.current = null;
     recDoneRef.current = false; stoppingRef.current = false;
     submittedRef.current = false; srRestartsRef.current = 0;
     srDoneRef.current = !SR;        // 不支持 Web Speech → 直接视为 SR 完成，走音频兜底
     setLiveText(''); setInterimText('');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      // 竞态防护：拿麦克风（含首次授权弹窗）期间用户已松手 → 别开录，干净退回 listening
+      if (stoppingRef.current) {
+        stream.getTracks().forEach(t => t.stop());
+        setPhase('listening');
+        toast.show('麦克风已就绪，按住说话即可');
+        return;
+      }
       const mime = pickMime();
       const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
       mediaRef.current = rec; chunksRef.current = [];
@@ -332,7 +340,8 @@ function App() {
     const r2 = recogRef.current;
     if (r2) { try { r2.stop(); } catch (e) { srDoneRef.current = true; } }
     else srDoneRef.current = true;
-    maybeFinish();
+    // 提交统一由 rec.onstop / SR.onend 触发，这里不调 maybeFinish——
+    // 否则快速点按 / 首次授权竞态下（录音器还没建好）会提前提交并把录音卡死
   };
 
   // 两条提交路径（文本 / 音频）共用的结果落地
