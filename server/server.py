@@ -63,10 +63,21 @@ ACCENT_VOICES = {
 }
 
 # ─── faster-whisper 懒加载（启动时跳过，第一次调用才下模型） ─────────
-# 默认 tiny.en：pyf 服务器 1.7G 内存，base.en 内存紧张
-# 想换更大模型：export WHISPER_SIZE=base.en / small.en
+# whisper 现在只是「兜底」路径：主路径是前端浏览器 Web Speech（流式 + 更准），
+# 只有浏览器实时识别失败/为空时才回落到上传音频走这里。
+# 默认 base.en：比 tiny.en 明显更准，int8 ≈150MB，pyf 1.7G 内存放得下。
+# 内存够还想更准：export WHISPER_SIZE=small.en（int8 ≈500MB，1.7G 偏紧需实测）。
 _whisper_model = None
 _whisper_lock = asyncio.Lock()
+
+# initial_prompt：给 whisper 喂领域词表做偏置，降低人名/术语误转写。
+# 注意 base/small.en 的 initial_prompt 别太长（会占解码窗口），点到为止即可。
+WHISPER_PROMPT = os.environ.get(
+    "WHISPER_PROMPT",
+    "A software engineer answers a technical job interview about AI agents, "
+    "LLM gateway, agent runtime, RAG, latency, throughput, Kubernetes, Redis, "
+    "Postgres, observability, STAR examples, ownership and quantified impact.",
+)
 
 
 async def get_whisper():
@@ -74,7 +85,7 @@ async def get_whisper():
     async with _whisper_lock:
         if _whisper_model is None:
             from faster_whisper import WhisperModel
-            size = os.environ.get("WHISPER_SIZE", "tiny.en")
+            size = os.environ.get("WHISPER_SIZE", "base.en")
             device = os.environ.get("WHISPER_DEVICE", "cpu")
             compute = os.environ.get("WHISPER_COMPUTE", "int8")
             _whisper_model = WhisperModel(size, device=device, compute_type=compute)
@@ -360,7 +371,10 @@ async def turn(
             raise HTTPException(status_code=400,
                 detail=f"音频解码失败（可能空录音）: {conv.stderr.decode('utf-8','ignore')[:300]}")
         model_w = await get_whisper()
-        segments, info = model_w.transcribe(wav_path, language="en", beam_size=1, vad_filter=True)
+        segments, info = model_w.transcribe(
+            wav_path, language="en", beam_size=5, vad_filter=True,
+            initial_prompt=WHISPER_PROMPT,
+        )
         text = " ".join(s.text.strip() for s in segments).strip()
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="STT 超时")
@@ -376,25 +390,64 @@ async def turn(
     if not text:
         text = "(no speech detected)"
 
-    # 2) Claude 评分 + 下一题
+    # 2+3) 评分 + 下一题 + TTS（与 /api/turn-text 共用）
+    return evaluate_answer(text, style, accent, role, questions, idx,
+                           transcript, current_question, model, stt_source="whisper")
+
+
+def evaluate_answer(text, style, accent, role, questions, idx,
+                    transcript, current_question, model, stt_source):
+    """拿到答案文本后：拼 transcript → LLM 评分+出下一题 → TTS。
+
+    被两条路共用：/api/turn（whisper 兜底转写后）和 /api/turn-text（前端浏览器
+    实时转写直接传文本，跳过音频上传 + ffmpeg + whisper）。
+    """
+    text = (text or "").strip() or "(no speech detected)"
     updated_transcript = transcript + f"\nQ: {current_question}\nA: {text}\n"
     prompt = turn_prompt(role, style, accent, updated_transcript, text, questions, idx)
     resp = call_llm(prompt, model)
     if "_error" in resp:
         raise HTTPException(status_code=502, detail=resp["_error"])
 
-    # 3) TTS 下一题
     next_q = resp.get("question") or ""
     audio_b64 = tts_to_base64(next_q, accent) if next_q else None
 
     return {
         "stt_text": text,
+        "stt_source": stt_source,
         "feedback": resp.get("feedback"),
         "question": next_q or None,
         "question_zh": resp.get("question_zh"),
         "audio_b64": audio_b64,
         "transcript": updated_transcript,
     }
+
+
+class TurnTextReq(BaseModel):
+    text: str
+    style: str = "mixed"
+    accent: str = "british"
+    role: str = "AI Agent Engineer (remote / overseas team)"
+    questions: int = 6
+    idx: int = 1  # 1-based：刚答的是第 idx 题
+    transcript: str = ""
+    current_question: str = ""
+    model: str = ""
+
+
+@app.post("/api/turn-text")
+def turn_text(req: TurnTextReq):
+    """主路径：前端浏览器实时 STT（Web Speech）已转好文本，直接传过来评分。
+
+    跳过音频上传 / ffmpeg / whisper —— 延迟和服务器负载都远低于 /api/turn，
+    且 Chrome 走 Google 引擎的转写准确率远高于服务器 tiny/base.en。
+    """
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="空转写文本")
+    return evaluate_answer(text, req.style, req.accent, req.role, req.questions,
+                           req.idx, req.transcript, req.current_question, req.model,
+                           stt_source="browser")
 
 
 @app.post("/api/summary")

@@ -203,13 +203,23 @@ function App() {
     return () => { a.pause(); audioRef.current = null; };
   }, [audioUrl]);
 
-  // 录音 + 实时字幕（Web Speech API；不存，纯 UX）
+  // 录音 + 实时字幕（Web Speech API = 主转写源；MediaRecorder 仅作兜底音频）
   const mediaRef = useRef(null);
   const chunksRef = useRef([]);
   const recogRef = useRef(null);
   const [liveText, setLiveText] = useState('');     // 已确定的小段
   const [interimText, setInterimText] = useState(''); // 浏览器正在猜的小段
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  // ── 一轮录音的协调状态（用 ref，避免事件回调里读到过期 state）──
+  const liveTextRef = useRef('');     // Web Speech 累计的最终文本（提交时用它）
+  const blobRef = useRef(null);       // 兜底音频 blob
+  const mimeRef = useRef('');         // 兜底音频 mime
+  const recDoneRef = useRef(false);   // MediaRecorder 已 stop
+  const srDoneRef = useRef(false);    // SpeechRecognition 已 end（或不支持）
+  const stoppingRef = useRef(false);  // 用户已松手，进入收尾（区分 SR 中途自动 end）
+  const submittedRef = useRef(false); // 本轮已提交，防重复
+  const srRestartsRef = useRef(0);    // SR 中途 end 后重启计数（防死循环）
 
   const startInterview = async () => {
     if (!apiBase) { setShowSettings(true); return; }
@@ -235,24 +245,45 @@ function App() {
     }
   };
 
+  // 一轮答完：录音(MediaRecorder)和实时识别(SR)都收尾后，决定走哪条提交路径
+  const maybeFinish = () => {
+    if (submittedRef.current) return;
+    if (!recDoneRef.current || !srDoneRef.current) return;  // 等两边都结束
+    submittedRef.current = true;
+    recogRef.current = null;
+    const text = (liveTextRef.current || '').trim();
+    if (text && /[a-zA-Z]/.test(text) && text.length >= 2) {
+      submitText(text);                               // 主路径：浏览器实时转写文本
+    } else {
+      uploadTurn(blobRef.current, mimeRef.current || 'audio/webm');  // 兜底：上传音频走 whisper
+    }
+  };
+
   const beginRecord = async () => {
     if (phase === 'recording') return;
+    // 重置本轮协调状态
+    liveTextRef.current = ''; blobRef.current = null; mimeRef.current = '';
+    recDoneRef.current = false; stoppingRef.current = false;
+    submittedRef.current = false; srRestartsRef.current = 0;
+    srDoneRef.current = !SR;        // 不支持 Web Speech → 直接视为 SR 完成，走音频兜底
+    setLiveText(''); setInterimText('');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
       const mime = pickMime();
       const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
       mediaRef.current = rec; chunksRef.current = [];
       rec.ondataavailable = (e) => { if (e.data && e.data.size) chunksRef.current.push(e.data); };
-      rec.onstop = async () => {
+      rec.onstop = () => {
         stream.getTracks().forEach(t => t.stop());
-        const blob = new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' });
-        await uploadTurn(blob, rec.mimeType || 'audio/webm');
+        blobRef.current = new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' });
+        mimeRef.current = rec.mimeType || 'audio/webm';
+        recDoneRef.current = true;
+        maybeFinish();
       };
       rec.start();
       setPhase('recording');
 
-      // 同步开启浏览器实时字幕（与录音并行，不冲突）
-      setLiveText(''); setInterimText('');
+      // 同步开启浏览器实时字幕（= 主转写源；与录音并行）
       if (SR) {
         try {
           const r2 = new SR();
@@ -266,14 +297,25 @@ function App() {
               if (ev.results[i].isFinal) finals += t;
               else interim += t;
             }
-            if (finals) setLiveText(prev => (prev + ' ' + finals).trim());
+            if (finals) {
+              liveTextRef.current = (liveTextRef.current + ' ' + finals).trim();
+              setLiveText(liveTextRef.current);
+            }
             setInterimText(interim);
           };
-          r2.onerror = () => {}; // 静默；浏览器不支持就退化为只显示完整 STT 结果
-          r2.onend = () => { recogRef.current = null; };
+          r2.onerror = () => {};  // 静默；真正失败由 onend → maybeFinish 走兜底
+          r2.onend = () => {
+            if (stoppingRef.current) { srDoneRef.current = true; maybeFinish(); return; }
+            // 录音中 SR 自己断了（安卓静音会自动停）→ 续上保持流式
+            if (srRestartsRef.current < 20) {
+              srRestartsRef.current++;
+              try { r2.start(); return; } catch (e) {}
+            }
+            srDoneRef.current = true;
+          };
           r2.start();
           recogRef.current = r2;
-        } catch (e) { /* 浏览器拒绝 -> 退化 */ }
+        } catch (e) { srDoneRef.current = true; /* 起不来 → 走音频兜底 */ }
       }
     } catch (e) {
       toast.show('麦克风权限被拒，去浏览器设置打开');
@@ -282,12 +324,67 @@ function App() {
   };
 
   const endRecord = () => {
+    if (stoppingRef.current) return;  // 防 mouseup + mouseleave 重复触发
+    stoppingRef.current = true;
     const r = mediaRef.current;
-    if (r && r.state !== 'inactive') r.stop();
+    if (r && r.state !== 'inactive') { try { r.stop(); } catch (e) { recDoneRef.current = true; } }
+    else recDoneRef.current = true;
     const r2 = recogRef.current;
-    if (r2) { try { r2.stop(); } catch (e) {} }
+    if (r2) { try { r2.stop(); } catch (e) { srDoneRef.current = true; } }
+    else srDoneRef.current = true;
+    maybeFinish();
   };
 
+  // 两条提交路径（文本 / 音频）共用的结果落地
+  const applyTurnResult = async (j) => {
+    setTranscript(j.transcript || transcript);
+    setHistory(h => [...h, {
+      idx: idx + 1, question, sttText: j.stt_text, feedback: j.feedback,
+    }]);
+    setIdx(i => i + 1);
+    // 把下一题先存起来；UI 进入 reviewing 显示反馈，等用户点「下一题 →」才暴露
+    setPendingNext(j.question ? {
+      question: j.question, question_zh: j.question_zh, audio_b64: j.audio_b64,
+    } : null);
+    setPhase('reviewing');
+    // 若是最后一题，提前拉总评，反正现在用户也在看反馈
+    if (!j.question) {
+      try {
+        const r2 = await fetch(apiBase + '/api/summary', {
+          method: 'POST',
+          headers: authHeaders({'Content-Type': 'application/json'}),
+          body: JSON.stringify({ transcript: j.transcript || transcript, style, accent }),
+        });
+        if (r2.ok) setSummary(await r2.json());
+      } catch {}
+    }
+  };
+
+  // 主路径：浏览器实时转写的文本直接评分，跳过音频上传 + whisper
+  const submitText = async (text) => {
+    setPhase('uploading');
+    try {
+      const r = await fetch(apiBase + '/api/turn-text', {
+        method: 'POST',
+        headers: authHeaders({'Content-Type': 'application/json'}),
+        body: JSON.stringify({
+          text, style, accent, questions: nQuestions,
+          idx: idx + 1, transcript, current_question: question || '',
+        }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      await applyTurnResult(await r.json());
+    } catch (e) {
+      // 文本路径失败（如后端未更新 / 网络）→ 有兜底音频就改走 whisper
+      if (blobRef.current && blobRef.current.size >= 4096) {
+        await uploadTurn(blobRef.current, mimeRef.current || 'audio/webm');
+      } else {
+        setError(String(e.message || e)); setPhase('error');
+      }
+    }
+  };
+
+  // 兜底路径：Web Speech 失败/为空时上传音频走服务器 whisper
   const uploadTurn = async (blob, mime) => {
     if (!blob || blob.size < 4096) {
       toast.show('录音太短，没听清，再试一次');
@@ -309,28 +406,7 @@ function App() {
         method: 'POST', headers: authHeaders(), body: fd,
       });
       if (!r.ok) throw new Error(await r.text());
-      const j = await r.json();
-      setTranscript(j.transcript || transcript);
-      setHistory(h => [...h, {
-        idx: idx + 1, question, sttText: j.stt_text, feedback: j.feedback,
-      }]);
-      setIdx(i => i + 1);
-      // 把下一题先存起来；UI 进入 reviewing 显示反馈，等用户点「下一题 →」才暴露
-      setPendingNext(j.question ? {
-        question: j.question, question_zh: j.question_zh, audio_b64: j.audio_b64,
-      } : null);
-      setPhase('reviewing');
-      // 若是最后一题，提前拉总评，反正现在用户也在看反馈
-      if (!j.question) {
-        try {
-          const r2 = await fetch(apiBase + '/api/summary', {
-            method: 'POST',
-            headers: authHeaders({'Content-Type': 'application/json'}),
-            body: JSON.stringify({ transcript: j.transcript || transcript, style, accent }),
-          });
-          if (r2.ok) setSummary(await r2.json());
-        } catch {}
-      }
+      await applyTurnResult(await r.json());
     } catch (e) {
       setError(String(e.message || e)); setPhase('error');
     }
@@ -472,7 +548,7 @@ function App() {
                     {interimText && <span className="text-[var(--muted)] italic"> {interimText}</span>}
                   </div>
                   <div className="text-[10px] text-[var(--muted)] mt-1.5">
-                    浏览器实时识别，仅供你看自己说了啥；提交后会用更准的 STT 重新转写做评分依据
+                    浏览器实时识别，松开即作为评分依据；识别不到时自动回落服务器转写
                   </div>
                 </div>
               )}

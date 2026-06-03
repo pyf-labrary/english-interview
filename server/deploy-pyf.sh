@@ -50,7 +50,7 @@ if [ "$mode" = "--sync" ]; then
 fi
 
 if [ "$mode" != "--restart" ]; then
-  echo "→ apt install ffmpeg + python venv（首次会下 faster-whisper tiny.en）"
+  echo "→ apt install ffmpeg + python venv（首次会下 faster-whisper base.en）"
   ssh "$SSH_TARGET" "bash -s" <<REMOTE
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -80,7 +80,7 @@ Environment="PATH=$REMOTE_ROOT/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="SRC_ROOT=$REMOTE_ROOT/cli"
 Environment="TTS_EDGE=$REMOTE_ROOT/bin/tts-edge"
 Environment="HF_ENDPOINT=https://hf-mirror.com"
-Environment="WHISPER_SIZE=tiny.en"
+Environment="WHISPER_SIZE=base.en"
 Environment="DEEPSEEK_MODEL=deepseek-v4-flash"
 Environment="PORT=8765"
 ExecStart=$REMOTE_ROOT/server/.venv/bin/python $REMOTE_ROOT/server/server.py
