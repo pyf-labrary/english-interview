@@ -29,7 +29,7 @@ from typing import Optional
 import requests
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 # ─── 路径 / 题库 / profile ────────────────────────────────────────────────
@@ -40,6 +40,9 @@ PROFILE = (SRC_ROOT / "profile.md").read_text(encoding="utf-8") if (SRC_ROOT / "
 QBANK = (SRC_ROOT / "question_bank.md").read_text(encoding="utf-8") if (SRC_ROOT / "question_bank.md").exists() else ""
 # tts-edge：默认仓库根 ./bin/tts-edge；env TTS_EDGE 可覆盖
 TTS_EDGE = Path(os.environ.get("TTS_EDGE", str(HERE.parent / "bin" / "tts-edge")))
+# 前端单文件：默认仓库根 ./index.html（部署时 rsync 到 REMOTE_ROOT/index.html）。
+# 让后端自己把页面发出去 → eng.panyifeng.xyz 同域托管前端，不再依赖 GitHub Pages。
+FRONTEND_HTML = Path(os.environ.get("FRONTEND_HTML", str(HERE.parent / "index.html")))
 
 # style / accent 复用 CLI 版本一致定义
 STYLE_HINTS = {
@@ -315,6 +318,15 @@ class SummaryReq(BaseModel):
     model: str = ""
 
 
+@app.get("/")
+def index():
+    """同域托管前端单文件。不在 /api/ 下 → 不被 token 中间件拦（页面要先能打开再填 token）。"""
+    if FRONTEND_HTML.exists():
+        return FileResponse(str(FRONTEND_HTML), media_type="text/html",
+                            headers={"Cache-Control": "no-cache"})
+    raise HTTPException(status_code=404, detail="frontend index.html 未部署到服务器")
+
+
 @app.get("/api/health")
 def health():
     return {
@@ -324,6 +336,7 @@ def health():
         "profile_loaded": bool(PROFILE),
         "qbank_loaded": bool(QBANK),
         "auth_required": bool(INTERVIEW_TOKEN),
+        "frontend_html": FRONTEND_HTML.exists(),
     }
 
 

@@ -32,6 +32,9 @@ rsync -avz --delete \
   --exclude logs --exclude .state.json --exclude __pycache__ \
   "$LOCAL_CLI/" "$SSH_TARGET:$REMOTE_ROOT/cli/"
 
+echo "→ rsync index.html（同域托管前端）..."
+rsync -avz "$REPO_ROOT/index.html" "$SSH_TARGET:$REMOTE_ROOT/index.html"
+
 rsync -avz "$LOCAL_TTS" "$SSH_TARGET:$REMOTE_ROOT/bin/tts-edge"
 # tts-edge 用 venv python（默认 #!/usr/bin/env python3 在 pyf 上没装 edge_tts）
 ssh "$SSH_TARGET" "chmod +x $REMOTE_ROOT/bin/tts-edge && \
