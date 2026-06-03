@@ -106,12 +106,14 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 
 def call_llm(prompt: str, model: Optional[str] = None,
-             connect_timeout: int = 8, read_timeout: int = 90) -> dict:
+             connect_timeout: int = 8, read_timeout: int = 90,
+             max_tokens: int = 2048) -> dict:
     """走 DeepSeek (OpenAI 兼容) chat/completions，json_object 强制结构化返回。
 
     - timeout=(connect, read) 分开，避免 SSL/socket 卡死时无限挂起
     - DeepSeek 偶发 'Service is too busy'，retry 一次（指数退避）
     - flash 撞 503 时自动 fallback 到 pro
+    - max_tokens：长输出（如对练多轮对话）要调大，否则 JSON 被截断 → 解析失败
     """
     if not DEEPSEEK_KEY:
         return {"_error": "DEEPSEEK_API_KEY 未设置（~/bin/.deepseek.env 或环境变量）"}
@@ -127,7 +129,7 @@ def call_llm(prompt: str, model: Optional[str] = None,
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.7,
-            "max_tokens": 2048,
+            "max_tokens": max_tokens,
         }
         try:
             r = requests.post(
@@ -145,11 +147,19 @@ def call_llm(prompt: str, model: Optional[str] = None,
         if r.status_code == 200:
             try:
                 envelope = r.json()
-                text = envelope["choices"][0]["message"]["content"]
+                choice = envelope["choices"][0]
+                text = choice["message"]["content"]
+                finish = choice.get("finish_reason")
             except Exception as e:
                 return {"_error": f"DeepSeek 响应解析失败: {e}: {r.text[:300]}"}
             obj = _extract_json(text)
-            return obj or {"_error": f"模型未返回 JSON: {text[:300]}"}
+            if obj:
+                return obj
+            # JSON 解析失败：区分「输出被 max_tokens 截断」和「模型真没返 JSON」
+            if finish == "length":
+                return {"_error": "模型输出超出 max_tokens 被截断，JSON 不完整。"
+                                  "请减少轮数/题数，或调大 max_tokens。"}
+            return {"_error": f"模型未返回 JSON: {text[:300]}"}
 
         # 非 200：429/503 重试 + flash → pro fallback；其它直接报错
         last_err = f"DeepSeek HTTP {r.status_code}: {r.text[:300]}"
@@ -622,7 +632,10 @@ def spar(req: SparReq):
     """AI 对练观摩：一次性生成完整 面试官×候选人 双人对话（文本，前端逐句配 TTS 播）。"""
     rounds = max(2, min(12, int(req.rounds or 6)))
     prompt = spar_prompt(req.role, req.style, req.accent, req.topic, rounds)
-    resp = call_llm(prompt, req.model, read_timeout=120)  # 多轮对话生成较慢
+    # 每轮 = 面试官+候选人两段双语对话，~600 tokens/轮；给足额度否则 JSON 被截断。
+    # DeepSeek 单次输出上限 8192，封顶到此。
+    max_tok = min(8192, rounds * 700 + 1500)
+    resp = call_llm(prompt, req.model, read_timeout=120, max_tokens=max_tok)  # 多轮对话生成较慢
     if "_error" in resp:
         raise HTTPException(status_code=502, detail=resp["_error"])
     dialogue = resp.get("dialogue") or []
