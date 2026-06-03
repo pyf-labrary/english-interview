@@ -25,4 +25,5 @@ Thumbs.db
 *.webm
 *.m4a
 *.wav
+node_modules
 node_modules/
